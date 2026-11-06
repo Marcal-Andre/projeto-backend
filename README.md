@@ -11,6 +11,34 @@ Para a implementação deste projeto vamo precisar usar as seguintes tecnologias
 - **JWT** para adicionar segurança e limitar o acesso nas rotas de API
 - **JEST** para nos ajudar a testar e manter a qualidade do código
 
+## Configuração local
+
+Copie `.env.example` para `.env` e substitua todos os valores de exemplo, em especial `DB_PASSWORD`, `MYSQL_ROOT_PASSWORD` e `APP_KEY`. O arquivo `.env` fica ignorado pelo Git e não deve ser compartilhado. Instale as dependências com `npm install`.
+
+Para iniciar um MySQL 8.4 local isolado em Docker, execute `docker compose up -d mysql`. O banco usa o volume persistente `mysql_data` e só publica a porta em `127.0.0.1`. Aguarde a verificação de saúde passar antes de executar a migração. `docker compose down` para o container e mantém os dados; não use `docker compose down -v` salvo se quiser apagar o banco local.
+
+`DB_NAME`, `DB_USER`, `DB_PASSWORD` e `APP_KEY` são obrigatórios. Gere uma chave JWT com `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`. `ADMIN_EMAIL` e `ADMIN_PASSWORD` são opcionais, mas devem ser definidas juntas.
+
+Com o MySQL em execução, execute `npm run db:migrate:status`, depois `npm run db:migrate` e, por fim, `npm start`. A aplicação não cria nem altera tabelas automaticamente: o esquema só é aplicado pela migração. `npm run db:migrate:undo` desfaz a migração mais recente e remove as tabelas correspondentes; use com cautela.
+
+O cadastro público cria contas com perfil `customer`. Apenas contas `admin` podem alterar categorias e produtos. Defina `ADMIN_EMAIL` e `ADMIN_PASSWORD` na primeira inicialização para criar a conta administrativa; se o e-mail já existir, a inicialização promove essa conta sem trocar sua senha. Alterações dos dados de usuário exigem token e só podem atingir a própria conta. Tokens expiram em uma hora. Rotas de escrita protegidas usam `Authorization: Bearer <JWT>` e retornam `401` sem token válido; cadastro e login são públicos. O login retorna `400` para dados malformados e `401` para credenciais incorretas; senhas têm mínimo de 8 caracteres.
+
+Para rotas protegidas, envie o cabeçalho HTTP `Authorization` usando o esquema `Bearer` seguido do JWT.
+
+Imagens são armazenadas no disco local em `MEDIA_DIR` e servidas por `/media`. Cada imagem deve ser PNG, JPEG ou WebP válido, ter no máximo 4 MB; o JSON tem limite de 12 MB. Em produção com múltiplas instâncias, configure um volume compartilhado e persistente, ou migre o serviço de armazenamento para objeto.
+
+## Execução e verificação de concorrência
+
+- `npm start` inicia o servidor na porta `3000` por padrão. Configure `PORT` e `HOST` pelo ambiente.
+- `GET /health` verifica se o processo HTTP está respondendo; não verifica a conexão com o banco de dados.
+- `GET /health/ready` verifica o acesso ao banco e retorna `503` quando a aplicação não está pronta para receber tráfego.
+- `npm test -- --runInBand` executa testes unitários, de controladores e HTTP ponta a ponta usando SQLite em memória, sem conectar ao MySQL.
+- `npm run test:e2e` executa apenas os testes HTTP ponta a ponta.
+- `npm run test:concurrency` tenta manter 5.000 requisições HTTP simultâneas no endpoint `/health`. O teste segura as respostas por 15 segundos para criar requisições em voo; isso não mede a latência normal nem garante capacidade em produção.
+- Para validar capacidade real, execute um teste de carga no ambiente de implantação, incluindo banco de dados, rede e endpoints de negócio, e defina limites de latência e taxa de erro.
+
+O login real é `POST /v1/user/token`; os antigos endpoints de demonstração `/token` e `/validar-token` ficam desativados por padrão. O preço é armazenado como `DECIMAL(10,2)` em vez de ponto flutuante, para evitar erros de arredondamento monetário.
+
 ## Estrutura de diretório
 ```
 project-root/
@@ -171,8 +199,8 @@ O objetivo deste requisito é criar a tabela de opções do produto no banco de 
   "firstname": "user firstname",
   "surname": "user surname",
   "email": "user@mail.com",
-  "password": "123@123",
-  "confirmPassword": "123@123",
+  "password": "123@1234",
+  "confirmPassword": "123@1234",
 }  
 ```
 
@@ -638,7 +666,7 @@ O objetivo deste requisito é criar a tabela de opções do produto no banco de 
 ```json
 {
   "email": "user@mail.com",
-  "password": "123@123",
+  "password": "123@1234",
 }  
 ```
 
@@ -657,6 +685,6 @@ O objetivo deste requisito é criar a tabela de opções do produto no banco de 
 <details>
   <summary><strong>Requisito 02 - Validar token nos métodos POST, PUT e DELETE</strong></summary><br>
 
-  Todos os endpoints POST, PUT e DELETE devem conter o cabeçalho `Authorization: Bearer <jwt>`, caso contrario a requisição
-  deve ser rejeitada com o status code **400 Bad Request**
+  As rotas de escrita protegidas devem conter o cabeçalho `Authorization: Bearer <jwt>`, caso contrario a requisição
+  deve ser rejeitada com o status code **401 Unauthorized**
 <details>
