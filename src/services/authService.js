@@ -1,7 +1,7 @@
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { randomBytes } = require('node:crypto');
-const { User } = require('../models');
+const { sequelize, User, UserAddress } = require('../models');
 const { badRequest, requiredString } = require('../utils/validation');
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -30,6 +30,35 @@ function validatePassword(value) {
   return value;
 }
 
+function validateAddress(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw badRequest('O campo address deve ser um objeto.');
+  }
+
+  const rawPostalCode = requiredString(input.postal_code, 'address.postal_code', 9);
+  if (!/^\d{5}-?\d{3}$/.test(rawPostalCode)) {
+    throw badRequest('O CEP deve conter 8 dígitos.');
+  }
+  const postalCode = rawPostalCode.replace(/\D/g, '');
+
+  const state = requiredString(input.state, 'address.state', 2).toUpperCase();
+  if (!/^[A-Z]{2}$/.test(state)) {
+    throw badRequest('O campo address.state deve conter a sigla de dois caracteres.');
+  }
+
+  return {
+    postal_code: postalCode,
+    street: requiredString(input.street, 'address.street', 180),
+    number: requiredString(input.number, 'address.number', 20),
+    complement: input.complement === undefined || input.complement === null || input.complement === ''
+      ? ''
+      : requiredString(input.complement, 'address.complement', 100),
+    neighborhood: requiredString(input.neighborhood, 'address.neighborhood', 100),
+    city: requiredString(input.city, 'address.city', 100),
+    state,
+  };
+}
+
 function publicUser(user) {
   return {
     id: user.id,
@@ -49,13 +78,22 @@ async function register(input) {
     throw badRequest('A senha e a confirmação devem ser iguais.');
   }
 
+  const address = input.address === undefined ? null : validateAddress(input.address);
   const hashedPassword = await bcrypt.hash(password, PASSWORD_ROUNDS);
-  const user = await User.create({
-    firstname,
-    surname,
-    email,
-    password: hashedPassword,
-    role: 'customer',
+  const user = await sequelize.transaction(async (transaction) => {
+    const createdUser = await User.create({
+      firstname,
+      surname,
+      email,
+      password: hashedPassword,
+      role: 'customer',
+    }, { transaction });
+
+    if (address) {
+      await UserAddress.create({ user_id: createdUser.id, ...address }, { transaction });
+    }
+
+    return createdUser;
   });
 
   return publicUser(user);
@@ -85,7 +123,7 @@ async function login(input) {
     { expiresIn: '1h', algorithm: 'HS256' },
   );
 
-  return { token };
+  return { token, user: publicUser(user) };
 }
 
 async function bootstrapAdmin() {
@@ -114,4 +152,11 @@ async function bootstrapAdmin() {
   return publicUser(user);
 }
 
-module.exports = { register, login, publicUser, normalizeEmail, bootstrapAdmin };
+module.exports = {
+  register,
+  login,
+  publicUser,
+  normalizeEmail,
+  validateAddress,
+  bootstrapAdmin,
+};

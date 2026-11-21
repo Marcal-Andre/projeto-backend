@@ -1,4 +1,4 @@
-const { User } = require('../models');
+const { User, UserAddress } = require('../models');
 const authService = require('../services/authService');
 const {
   requireObject,
@@ -8,6 +8,10 @@ const {
 
 async function getById(req, res) {
   const id = positiveId(req.params.id);
+  if (req.user.id !== id && req.user.role !== 'admin') {
+    return res.status(403).json({ error: { message: 'Você só pode consultar sua própria conta.' } });
+  }
+
   const user = await User.findByPk(id);
 
   if (!user) {
@@ -42,6 +46,46 @@ async function update(req, res) {
   return res.status(204).end();
 }
 
+async function getAddress(req, res) {
+  const id = positiveId(req.params.id);
+  if (req.user.id !== id) {
+    return res.status(403).json({ error: { message: 'Você só pode consultar seu próprio endereço.' } });
+  }
+
+  const address = await UserAddress.findOne({ where: { user_id: id } });
+  if (!address) {
+    return res.status(404).json({ error: { message: 'Endereço não encontrado.' } });
+  }
+
+  const {
+    postal_code,
+    street,
+    number,
+    complement,
+    neighborhood,
+    city,
+    state,
+  } = address.get({ plain: true });
+  return res.json({ postal_code, street, number, complement, neighborhood, city, state });
+}
+
+async function saveAddress(req, res) {
+  const id = positiveId(req.params.id);
+  if (req.user.id !== id) {
+    return res.status(403).json({ error: { message: 'Você só pode atualizar seu próprio endereço.' } });
+  }
+
+  const input = requireObject(req.body);
+  const address = authService.validateAddress(input);
+  const [record] = await UserAddress.findOrCreate({
+    where: { user_id: id },
+    defaults: { user_id: id, ...address },
+  });
+  await record.update(address);
+
+  return res.json(address);
+}
+
 async function remove(req, res) {
   const id = positiveId(req.params.id);
   if (req.user.id !== id) {
@@ -61,4 +105,4 @@ async function login(req, res) {
   return res.json(await authService.login(input));
 }
 
-module.exports = { getById, create, update, remove, login };
+module.exports = { getById, create, update, getAddress, saveAddress, remove, login };

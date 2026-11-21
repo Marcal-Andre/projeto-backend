@@ -1,16 +1,21 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const cors = require('./middleware/cors');
 const errorHandler = require('./middleware/errorHandler');
 const notFound = require('./middleware/notFound');
 const { MEDIA_ROOT } = require('./services/imageStorage');
 const userRoutes = require('./routes/userRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
 const productRoutes = require('./routes/productRoutes');
+const cartRoutes = require('./routes/cartRoutes');
+const orderRoutes = require('./routes/orderRoutes');
+const paymentRoutes = require('./routes/paymentRoutes');
 const sequelize = require('./config/database');
 
 const app = express();
 
 app.disable('x-powered-by');
+app.use(cors);
 app.use(express.json({ limit: '12mb' }));
 app.use('/media', express.static(MEDIA_ROOT, {
   dotfiles: 'deny',
@@ -41,6 +46,9 @@ app.get('/health/ready', async (req, res) => {
 app.use('/v1/user', userRoutes);
 app.use('/v1/category', categoryRoutes);
 app.use('/v1/product', productRoutes);
+app.use('/v1/cart', cartRoutes);
+app.use('/v1/order', orderRoutes);
+app.use('/v1/payments', paymentRoutes);
 
 if (
   process.env.ENABLE_DEMO_TOKEN_ENDPOINTS === 'true' &&

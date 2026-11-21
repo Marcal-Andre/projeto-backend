@@ -1,4 +1,5 @@
 const { Sequelize } = require('sequelize');
+const databasePassword = require('./databasePassword');
 
 const dialect = process.env.DB_DIALECT || 'mysql';
 let sequelize;
@@ -22,7 +23,7 @@ if (dialect === 'sqlite' && process.env.NODE_ENV === 'test') {
   sequelize = new Sequelize(
     process.env.DB_NAME || 'store_dev',
     process.env.DB_USER || 'root',
-    process.env.DB_PASSWORD || '',
+    databasePassword(),
     {
       dialect,
       host: process.env.DB_HOST || '127.0.0.1',

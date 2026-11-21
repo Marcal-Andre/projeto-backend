@@ -5,7 +5,9 @@ const userController = require('../controllers/userController');
 const router = express.Router();
 
 router.post('/token', userController.login);
-router.get('/:id', userController.getById);
+router.get('/:id/address', authenticate, userController.getAddress);
+router.put('/:id/address', authenticate, userController.saveAddress);
+router.get('/:id', authenticate, userController.getById);
 router.post('/', userController.create);
 router.put('/:id', authenticate, userController.update);
 router.delete('/:id', authenticate, userController.remove);

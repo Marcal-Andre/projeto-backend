@@ -30,6 +30,85 @@ const User = sequelize.define('User', {
   },
 });
 
+const UserAddress = sequelize.define('UserAddress', {
+  id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+  user_id: { type: DataTypes.INTEGER, allowNull: false, unique: true },
+  postal_code: { type: DataTypes.STRING(8), allowNull: false },
+  street: { type: DataTypes.STRING(180), allowNull: false },
+  number: { type: DataTypes.STRING(20), allowNull: false },
+  complement: { type: DataTypes.STRING(100), allowNull: false, defaultValue: '' },
+  neighborhood: { type: DataTypes.STRING(100), allowNull: false },
+  city: { type: DataTypes.STRING(100), allowNull: false },
+  state: { type: DataTypes.STRING(2), allowNull: false },
+}, {
+  ...timestamps,
+  tableName: 'user_addresses',
+});
+
+const Cart = sequelize.define('Cart', {
+  id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+  user_id: { type: DataTypes.INTEGER, allowNull: false, unique: true },
+}, {
+  ...timestamps,
+  tableName: 'carts',
+});
+
+const CartItem = sequelize.define('CartItem', {
+  id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+  cart_id: { type: DataTypes.INTEGER, allowNull: false },
+  product_id: { type: DataTypes.INTEGER, allowNull: false },
+  quantity: { type: DataTypes.INTEGER, allowNull: false },
+  selected_options: { type: DataTypes.TEXT, allowNull: false },
+  options_key: { type: DataTypes.STRING(64), allowNull: false },
+}, {
+  ...timestamps,
+  tableName: 'cart_items',
+  indexes: [{
+    unique: true,
+    fields: ['cart_id', 'product_id', 'options_key'],
+    name: 'cart_items_line_unique',
+  }],
+});
+
+const Order = sequelize.define('Order', {
+  id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+  user_id: { type: DataTypes.INTEGER, allowNull: true },
+  status: {
+    type: DataTypes.ENUM('pending', 'paid', 'cancelled'),
+    allowNull: false,
+    defaultValue: 'pending',
+  },
+  expires_at: { type: DataTypes.DATE, allowNull: false },
+  total: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
+  mercadopago_preference_id: { type: DataTypes.STRING(100), allowNull: true, unique: true },
+  mercadopago_init_point: { type: DataTypes.STRING(1000), allowNull: true },
+  mercadopago_payment_id: { type: DataTypes.STRING(50), allowNull: true },
+  mercadopago_payment_status: { type: DataTypes.STRING(50), allowNull: true },
+  postal_code: { type: DataTypes.STRING(8), allowNull: false },
+  street: { type: DataTypes.STRING(180), allowNull: false },
+  number: { type: DataTypes.STRING(20), allowNull: false },
+  complement: { type: DataTypes.STRING(100), allowNull: false, defaultValue: '' },
+  neighborhood: { type: DataTypes.STRING(100), allowNull: false },
+  city: { type: DataTypes.STRING(100), allowNull: false },
+  state: { type: DataTypes.STRING(2), allowNull: false },
+}, {
+  ...timestamps,
+  tableName: 'orders',
+});
+
+const OrderItem = sequelize.define('OrderItem', {
+  id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+  order_id: { type: DataTypes.INTEGER, allowNull: false },
+  product_id: { type: DataTypes.INTEGER, allowNull: true },
+  product_name: { type: DataTypes.STRING(150), allowNull: false },
+  quantity: { type: DataTypes.INTEGER, allowNull: false },
+  unit_price: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
+  selected_options: { type: DataTypes.TEXT, allowNull: false },
+}, {
+  timestamps: false,
+  tableName: 'order_items',
+});
+
 const Category = sequelize.define('Category', {
   id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
   name: { type: DataTypes.STRING(100), allowNull: false },
@@ -121,9 +200,27 @@ Category.belongsToMany(Product, {
   otherKey: 'product_id',
 });
 
+User.hasOne(UserAddress, { as: 'address', foreignKey: 'user_id', onDelete: 'CASCADE' });
+UserAddress.belongsTo(User, { foreignKey: 'user_id' });
+User.hasOne(Cart, { as: 'cart', foreignKey: 'user_id', onDelete: 'CASCADE' });
+Cart.belongsTo(User, { foreignKey: 'user_id' });
+Cart.hasMany(CartItem, { as: 'items', foreignKey: 'cart_id', onDelete: 'CASCADE' });
+CartItem.belongsTo(Cart, { foreignKey: 'cart_id' });
+CartItem.belongsTo(Product, { as: 'product', foreignKey: 'product_id' });
+User.hasMany(Order, { as: 'orders', foreignKey: 'user_id', onDelete: 'SET NULL' });
+Order.belongsTo(User, { foreignKey: 'user_id' });
+Order.hasMany(OrderItem, { as: 'items', foreignKey: 'order_id', onDelete: 'CASCADE' });
+OrderItem.belongsTo(Order, { foreignKey: 'order_id' });
+OrderItem.belongsTo(Product, { as: 'product', foreignKey: 'product_id' });
+
 module.exports = {
   sequelize,
   User,
+  UserAddress,
+  Cart,
+  CartItem,
+  Order,
+  OrderItem,
   Category,
   Product,
   ProductImage,

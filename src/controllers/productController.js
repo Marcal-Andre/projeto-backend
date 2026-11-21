@@ -378,7 +378,7 @@ async function filteredProductIds(categoryIds, filters) {
 async function search(req, res) {
   const { limit, page } = pagination(req.query);
   const fields = fieldsFor(req.query.fields);
-  const where = {};
+  const where = { enabled: true };
 
   if (req.query.match !== undefined) {
     const match = requiredString(req.query.match, 'match', 100);
@@ -429,7 +429,8 @@ async function search(req, res) {
 }
 
 async function getById(req, res) {
-  const product = await Product.findByPk(positiveId(req.params.id), {
+  const product = await Product.findOne({
+    where: { id: positiveId(req.params.id), enabled: true },
     include: productIncludes(),
   });
   if (!product) {

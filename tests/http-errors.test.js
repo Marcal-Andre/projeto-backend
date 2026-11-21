@@ -1,4 +1,7 @@
 const http = require('node:http');
+process.env.DB_DIALECT = 'sqlite';
+process.env.DB_STORAGE = ':memory:';
+process.env.CORS_ORIGINS = 'http://localhost:5173';
 const app = require('../src/app');
 const errorHandler = require('../src/middleware/errorHandler');
 
@@ -40,6 +43,27 @@ describe('respostas de erro HTTP', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('x-powered-by')).toBeNull();
     await expect(response.json()).resolves.toEqual({ status: 'ok' });
+  });
+
+  it('permite preflight somente para a origem configurada', async () => {
+    const allowed = await fetch(`${baseUrl}/v1/order`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'http://localhost:5173',
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'authorization,content-type',
+      },
+    });
+    expect(allowed.status).toBe(204);
+    expect(allowed.headers.get('access-control-allow-origin')).toBe('http://localhost:5173');
+    expect(allowed.headers.get('access-control-allow-headers')).toContain('Authorization');
+
+    const denied = await fetch(`${baseUrl}/v1/order`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://untrusted.example' },
+    });
+    expect(denied.status).toBe(403);
+    expect(denied.headers.get('access-control-allow-origin')).toBeNull();
   });
 
   it('não expõe a rota de token de demonstração por padrão', async () => {

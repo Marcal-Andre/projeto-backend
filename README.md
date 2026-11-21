@@ -17,11 +17,13 @@ Copie `.env.example` para `.env` e substitua todos os valores de exemplo, em esp
 
 Para iniciar um MySQL 8.4 local isolado em Docker, execute `docker compose up -d mysql`. O banco usa o volume persistente `mysql_data` e só publica a porta em `127.0.0.1`. Aguarde a verificação de saúde passar antes de executar a migração. `docker compose down` para o container e mantém os dados; não use `docker compose down -v` salvo se quiser apagar o banco local.
 
-`DB_NAME`, `DB_USER`, `DB_PASSWORD` e `APP_KEY` são obrigatórios. Gere uma chave JWT com `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`. `ADMIN_EMAIL` e `ADMIN_PASSWORD` são opcionais, mas devem ser definidas juntas.
+`DB_NAME`, `DB_USER` e `APP_KEY` são obrigatórios. `DB_PASSWORD` é obrigatória fora do desenvolvimento local; em `NODE_ENV=development`, pode ser omitida somente quando `DB_HOST` aponta para `localhost`, `127.0.0.1` ou `::1`. Não use senha vazia em produção. Gere uma chave JWT com `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`. `ADMIN_EMAIL` e `ADMIN_PASSWORD` são opcionais, mas devem ser definidas juntas.
 
-Com o MySQL em execução, execute `npm run db:migrate:status`, depois `npm run db:migrate` e, por fim, `npm start`. A aplicação não cria nem altera tabelas automaticamente: o esquema só é aplicado pela migração. `npm run db:migrate:undo` desfaz a migração mais recente e remove as tabelas correspondentes; use com cautela.
+Configure `CORS_ORIGINS` com as origens exatas do frontend, separadas por vírgula e sem caminhos. O exemplo libera `localhost:5173` e `127.0.0.1:5173` apenas para desenvolvimento; em produção, informe o domínio HTTPS do site. Origens não listadas não recebem permissão CORS.
 
-O cadastro público cria contas com perfil `customer`. Apenas contas `admin` podem alterar categorias e produtos. Defina `ADMIN_EMAIL` e `ADMIN_PASSWORD` na primeira inicialização para criar a conta administrativa; se o e-mail já existir, a inicialização promove essa conta sem trocar sua senha. Alterações dos dados de usuário exigem token e só podem atingir a própria conta. Tokens expiram em uma hora. Rotas de escrita protegidas usam `Authorization: Bearer <JWT>` e retornam `401` sem token válido; cadastro e login são públicos. O login retorna `400` para dados malformados e `401` para credenciais incorretas; senhas têm mínimo de 8 caracteres.
+Com o MySQL em execução, crie o banco caso ainda não exista com `npx sequelize-cli db:create`, execute `npm run db:migrate:status`, depois `npm run db:migrate` e, por fim, `npm start`. A aplicação não cria nem altera tabelas automaticamente: o esquema só é aplicado pela migração. `npm run db:migrate:undo` desfaz a migração mais recente e remove as tabelas correspondentes; use com cautela.
+
+O cadastro público cria contas com perfil `customer`. Apenas contas `admin` podem alterar categorias e produtos. Em cada requisição protegida, a API consulta a conta e o perfil atuais no banco; o papel registrado no JWT não concede permissões por si só, e a exclusão da conta revoga o token imediatamente. Defina `ADMIN_EMAIL` e `ADMIN_PASSWORD` na primeira inicialização para criar a conta administrativa; se o e-mail já existir, a inicialização promove essa conta sem trocar sua senha. Alterações dos dados de usuário exigem token e só podem atingir a própria conta. Tokens expiram em uma hora. Rotas de escrita protegidas usam `Authorization: Bearer <JWT>` e retornam `401` sem token válido; cadastro e login são públicos. O login retorna `400` para dados malformados e `401` para credenciais incorretas; senhas têm mínimo de 8 caracteres.
 
 Para rotas protegidas, envie o cabeçalho HTTP `Authorization` usando o esquema `Bearer` seguido do JWT.
 
@@ -38,6 +40,21 @@ Imagens são armazenadas no disco local em `MEDIA_DIR` e servidas por `/media`. 
 - Para validar capacidade real, execute um teste de carga no ambiente de implantação, incluindo banco de dados, rede e endpoints de negócio, e defina limites de latência e taxa de erro.
 
 O login real é `POST /v1/user/token`; os antigos endpoints de demonstração `/token` e `/validar-token` ficam desativados por padrão. O preço é armazenado como `DECIMAL(10,2)` em vez de ponto flutuante, para evitar erros de arredondamento monetário.
+
+## Enderecos de entrega e carrinho
+
+- `POST /v1/user` aceita um objeto `address` com `postal_code`, `street`, `number`, `complement`, `neighborhood`, `city` e `state`; o endereco e salvo junto com o cadastro.
+- `GET` e `PUT /v1/user/:id/address` permitem consultar e atualizar somente o endereco da propria conta autenticada.
+- `GET /v1/cart`, `POST /v1/cart/items`, `PATCH /v1/cart/items/:itemId` e `DELETE /v1/cart/items/:itemId` exigem JWT. O backend valida opcoes e estoque e mantem um carrinho por usuario.
+- Execute `npm run db:migrate` para criar as tabelas de enderecos e carrinhos antes de usar esses endpoints.
+- `GET /v1/user/:id` exige JWT e permite acesso ao titular da conta ou a um administrador.
+- A busca e a consulta pública de produtos retornam somente produtos habilitados.
+- `POST /v1/order` finaliza o carrinho com o endereço salvo, valida novamente disponibilidade/opções/estoque, registra os preços vigentes, reserva o estoque por 30 minutos e cria um pedido `pending` numa transação. `GET /v1/order` e `GET /v1/order/:id` mostram somente pedidos do usuário autenticado.
+- Para pagar, o cliente autenticado chama `POST /v1/order/:id/payment`; a resposta contém `checkout_url`, para redirecionar ao Checkout Pro. O pedido só muda para `paid` após confirmação assinada do webhook; URLs de retorno do navegador não confirmam pagamentos.
+- `POST /v1/order/:id/cancel` cancela um pedido pendente e libera o estoque. Pedidos pendentes expiram automaticamente após 30 minutos; uma aprovação recebida após cancelamento/expiração é estornada pelo backend.
+- Configure `MP_ENVIRONMENT=sandbox`, `MP_ACCESS_TOKEN`, `MP_WEBHOOK_SECRET` e `MP_PUBLIC_API_URL` no `.env`. Use as credenciais de teste do Mercado Pago no desenvolvimento e credenciais de produção somente em implantação HTTPS. `MP_PUBLIC_API_URL` deve ser uma URL pública do backend (em desenvolvimento, use um túnel HTTPS) e o webhook deve estar configurado para eventos de pagamentos (`payment`). Nunca exponha essas credenciais no frontend.
+- As URLs de retorno do frontend ficam em `MP_SUCCESS_URL`, `MP_PENDING_URL` e `MP_FAILURE_URL`; os valores de exemplo apontam para `http://localhost:5173`.
+- Execute `npm run db:migrate` para criar também as tabelas de pedidos e itens.
 
 ## Estrutura de diretório
 ```

@@ -3,6 +3,7 @@ require('dotenv').config();
 const app = require('./app');
 const { sequelize } = require('./models');
 const { bootstrapAdmin } = require('./services/authService');
+const { expirePendingOrders } = require('./services/orderExpiration');
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || '0.0.0.0';
 
@@ -10,7 +11,7 @@ if (!Number.isInteger(port) || port < 0 || port > 65535) {
   throw new Error('A variável PORT deve ser um número entre 0 e 65535.');
 }
 
-for (const name of ['DB_NAME', 'DB_USER', 'DB_PASSWORD', 'APP_KEY']) {
+for (const name of ['DB_NAME', 'DB_USER', 'APP_KEY']) {
   if (!process.env[name]) {
     throw new Error(`A variável de ambiente ${name} é obrigatória.`);
   }
@@ -27,6 +28,7 @@ if (Buffer.byteLength(process.env.APP_KEY, 'utf8') < 32) {
 
 let server;
 let shuttingDown = false;
+let orderExpirationTimer;
 
 async function shutdown(signal) {
   if (shuttingDown) {
@@ -35,6 +37,7 @@ async function shutdown(signal) {
 
   shuttingDown = true;
   console.log(`Sinal ${signal} recebido. Encerrando servidor.`);
+  clearInterval(orderExpirationTimer);
 
   if (!server) {
     await sequelize.close();
@@ -77,6 +80,15 @@ async function start() {
   if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
     await bootstrapAdmin();
   }
+  orderExpirationTimer = setInterval(() => {
+    expirePendingOrders().catch((error) => {
+      console.error('Falha ao expirar pedidos pendentes:', error);
+    });
+  }, 60000);
+  orderExpirationTimer.unref();
+  expirePendingOrders().catch((error) => {
+    console.error('Falha ao expirar pedidos pendentes na inicialização:', error);
+  });
   server = app.listen({ port, host, backlog: 8192 }, () => {
     console.log(`Servidor executando em http://${host}:${server.address().port}.`);
   });

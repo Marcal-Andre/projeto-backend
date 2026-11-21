@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
+const { User } = require('../models');
 
-function authenticate(req, res, next) {
+async function authenticate(req, res, next) {
   const header = req.get('authorization');
   const match = typeof header === 'string' && header.match(/^Bearer ([^\s]+)$/i);
 
@@ -10,16 +11,11 @@ function authenticate(req, res, next) {
     });
   }
 
+  let payload;
   try {
-    const payload = jwt.verify(match[1], process.env.APP_KEY, {
+    payload = jwt.verify(match[1], process.env.APP_KEY, {
       algorithms: ['HS256'],
     });
-    if (!Number.isInteger(payload.id) || !['customer', 'admin'].includes(payload.role)) {
-      return res.status(401).json({ error: { message: 'Token inválido.' } });
-    }
-
-    req.user = { id: payload.id, role: payload.role };
-    return next();
   } catch (error) {
     if (error instanceof jwt.JsonWebTokenError || error instanceof jwt.TokenExpiredError) {
       return res.status(401).json({ error: { message: 'Token inválido ou expirado.' } });
@@ -27,6 +23,24 @@ function authenticate(req, res, next) {
 
     return next(error);
   }
+
+  if (!payload || !Number.isSafeInteger(payload.id) || payload.id < 1) {
+    return res.status(401).json({ error: { message: 'Token inválido.' } });
+  }
+
+  let user;
+  try {
+    user = await User.findByPk(payload.id);
+  } catch (error) {
+    return next(error);
+  }
+
+  if (!user) {
+    return res.status(401).json({ error: { message: 'Usuário não encontrado ou acesso revogado.' } });
+  }
+
+  req.user = { id: user.id, role: user.role };
+  return next();
 }
 
 module.exports = authenticate;
