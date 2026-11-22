@@ -78,6 +78,12 @@ const Order = sequelize.define('Order', {
     allowNull: false,
     defaultValue: 'pending',
   },
+  fulfillment_status: {
+    type: DataTypes.STRING(20),
+    allowNull: false,
+    defaultValue: 'unfulfilled',
+  },
+  idempotency_key: { type: DataTypes.STRING(128), allowNull: true },
   expires_at: { type: DataTypes.DATE, allowNull: false },
   total: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
   mercadopago_preference_id: { type: DataTypes.STRING(100), allowNull: true, unique: true },
@@ -94,6 +100,37 @@ const Order = sequelize.define('Order', {
 }, {
   ...timestamps,
   tableName: 'orders',
+  indexes: [{
+    unique: true,
+    fields: ['user_id', 'idempotency_key'],
+    name: 'orders_user_id_idempotency_key_unique',
+  }],
+});
+
+const OrderStatusHistory = sequelize.define('OrderStatusHistory', {
+  id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+  order_id: { type: DataTypes.INTEGER, allowNull: false },
+  actor_user_id: { type: DataTypes.INTEGER, allowNull: true },
+  scope: { type: DataTypes.STRING(20), allowNull: false },
+  from_status: { type: DataTypes.STRING(20), allowNull: true },
+  to_status: { type: DataTypes.STRING(20), allowNull: false },
+  created_at: { type: DataTypes.DATE, allowNull: false },
+}, {
+  timestamps: false,
+  tableName: 'order_status_history',
+});
+
+const Notification = sequelize.define('Notification', {
+  id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+  user_id: { type: DataTypes.INTEGER, allowNull: false },
+  order_id: { type: DataTypes.INTEGER, allowNull: true },
+  type: { type: DataTypes.STRING(40), allowNull: false },
+  message: { type: DataTypes.STRING(255), allowNull: false },
+  read_at: { type: DataTypes.DATE, allowNull: true },
+  created_at: { type: DataTypes.DATE, allowNull: false },
+}, {
+  timestamps: false,
+  tableName: 'notifications',
 });
 
 const OrderItem = sequelize.define('OrderItem', {
@@ -212,6 +249,17 @@ Order.belongsTo(User, { foreignKey: 'user_id' });
 Order.hasMany(OrderItem, { as: 'items', foreignKey: 'order_id', onDelete: 'CASCADE' });
 OrderItem.belongsTo(Order, { foreignKey: 'order_id' });
 OrderItem.belongsTo(Product, { as: 'product', foreignKey: 'product_id' });
+Order.hasMany(OrderStatusHistory, {
+  as: 'statusHistory',
+  foreignKey: 'order_id',
+  onDelete: 'CASCADE',
+});
+OrderStatusHistory.belongsTo(Order, { foreignKey: 'order_id' });
+OrderStatusHistory.belongsTo(User, { as: 'actor', foreignKey: 'actor_user_id' });
+User.hasMany(Notification, { as: 'notifications', foreignKey: 'user_id', onDelete: 'CASCADE' });
+Notification.belongsTo(User, { foreignKey: 'user_id' });
+Order.hasMany(Notification, { as: 'notifications', foreignKey: 'order_id', onDelete: 'SET NULL' });
+Notification.belongsTo(Order, { foreignKey: 'order_id' });
 
 module.exports = {
   sequelize,
@@ -220,6 +268,8 @@ module.exports = {
   Cart,
   CartItem,
   Order,
+  OrderStatusHistory,
+  Notification,
   OrderItem,
   Category,
   Product,

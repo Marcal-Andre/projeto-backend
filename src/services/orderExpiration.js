@@ -1,6 +1,7 @@
 const { Op } = require('sequelize');
 const { sequelize, Order } = require('../models');
 const { releaseOrderStock } = require('./inventory');
+const { recordOrderStatusChange } = require('./orderStatusHistory');
 
 let expirationInProgress = false;
 
@@ -41,6 +42,13 @@ async function expirePendingOrders(now = new Date()) {
           status: 'cancelled',
           mercadopago_payment_status: 'expired',
         }, { transaction });
+        await recordOrderStatusChange({
+          order,
+          scope: 'payment',
+          fromStatus: 'pending',
+          toStatus: 'cancelled',
+          transaction,
+        });
         return true;
       });
       if (expired) {

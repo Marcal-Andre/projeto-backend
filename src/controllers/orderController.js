@@ -4,6 +4,7 @@ const {
   CartItem,
   Order,
   OrderItem,
+  OrderStatusHistory,
   Product,
   ProductOption,
   User,
@@ -12,6 +13,7 @@ const {
 const { badRequest, positiveId } = require('../utils/validation');
 const mercadoPago = require('../services/mercadoPago');
 const { releaseOrderStock } = require('../services/inventory');
+const { recordOrderStatusChange } = require('../services/orderStatusHistory');
 const { fromCents, toCents } = require('../utils/money');
 
 function conflict(message) {
@@ -47,6 +49,7 @@ function serializeOrder(order) {
   return {
     id: values.id,
     status: values.status,
+    fulfillment_status: values.fulfillment_status,
     total: Number(values.total),
     expires_at: values.expires_at,
     payment_status: values.mercadopago_payment_status,
@@ -60,6 +63,12 @@ function serializeOrder(order) {
       state: values.state,
     },
     created_at: values.created_at,
+    fulfillment_history: (values.statusHistory || [])
+      .filter((entry) => entry.scope === 'fulfillment')
+      .map((entry) => ({
+        status: entry.to_status,
+        created_at: entry.created_at,
+      })),
     items: (values.items || []).map((item) => ({
       id: item.id,
       product_id: item.product_id,
@@ -72,114 +81,164 @@ function serializeOrder(order) {
 }
 
 function orderIncludes() {
-  return [{ model: OrderItem, as: 'items', separate: true, order: [['id', 'ASC']] }];
+  return [
+    { model: OrderItem, as: 'items', separate: true, order: [['id', 'ASC']] },
+    {
+      model: OrderStatusHistory,
+      as: 'statusHistory',
+      separate: true,
+      order: [['created_at', 'ASC'], ['id', 'ASC']],
+    },
+  ];
 }
 
 async function create(req, res) {
-  const order = await sequelize.transaction(async (transaction) => {
-    const address = await UserAddress.findOne({
-      where: { user_id: req.user.id },
-      transaction,
+  const idempotencyKey = req.get('idempotency-key');
+  if (
+    idempotencyKey !== undefined &&
+    (typeof idempotencyKey !== 'string' || !/^[\x21-\x7E]{1,128}$/.test(idempotencyKey))
+  ) {
+    throw badRequest('O cabeçalho Idempotency-Key deve conter de 1 a 128 caracteres ASCII sem espaços.');
+  }
+
+  if (idempotencyKey) {
+    const existing = await Order.findOne({
+      where: { user_id: req.user.id, idempotency_key: idempotencyKey },
+      include: orderIncludes(),
     });
-    if (!address) {
-      throw badRequest('Cadastre um endereço antes de finalizar a compra.');
+    if (existing) {
+      return res.status(200).json(serializeOrder(existing));
     }
+  }
 
-    const cart = await Cart.findOne({
-      where: { user_id: req.user.id },
-      transaction,
-      ...(transaction.LOCK?.UPDATE ? { lock: transaction.LOCK.UPDATE } : {}),
-    });
-    if (!cart) {
-      throw badRequest('O carrinho está vazio.');
-    }
+  let order;
+  try {
+    order = await sequelize.transaction(async (transaction) => {
+      const address = await UserAddress.findOne({
+        where: { user_id: req.user.id },
+        transaction,
+      });
+      if (!address) {
+        throw badRequest('Cadastre um endereço antes de finalizar a compra.');
+      }
 
-    const cartItems = await CartItem.findAll({
-      where: { cart_id: cart.id },
-      order: [['id', 'ASC']],
-      transaction,
-    });
-    if (cartItems.length === 0) {
-      throw badRequest('O carrinho está vazio.');
-    }
-
-    const quantitiesByProduct = new Map();
-    for (const item of cartItems) {
-      quantitiesByProduct.set(
-        item.product_id,
-        (quantitiesByProduct.get(item.product_id) || 0) + item.quantity,
-      );
-    }
-
-    const products = new Map();
-    for (const productId of [...quantitiesByProduct.keys()].sort((left, right) => left - right)) {
-      const product = await Product.findByPk(productId, {
-        include: [{ model: ProductOption, as: 'options' }],
+      const cart = await Cart.findOne({
+        where: { user_id: req.user.id },
         transaction,
         ...(transaction.LOCK?.UPDATE ? { lock: transaction.LOCK.UPDATE } : {}),
       });
-      if (!product || !product.enabled) {
-        throw conflict('Um ou mais produtos do carrinho não estão mais disponíveis.');
+      if (!cart) {
+        throw badRequest('O carrinho está vazio.');
       }
 
-      const quantity = quantitiesByProduct.get(productId);
-      if (quantity > product.stock) {
-        throw conflict(`Estoque insuficiente para o produto ${product.name}.`);
+      const cartItems = await CartItem.findAll({
+        where: { cart_id: cart.id },
+        order: [['id', 'ASC']],
+        transaction,
+      });
+      if (cartItems.length === 0) {
+        throw badRequest('O carrinho está vazio.');
       }
-      products.set(productId, product);
-    }
 
-    const lines = cartItems.map((item) => {
-      const product = products.get(item.product_id);
-      return {
-        product,
-        quantity: item.quantity,
-        selectedOptions: validateSelectedOptions(item, product),
-        unitPriceCents: toCents(product.price_with_discount),
-      };
+      const quantitiesByProduct = new Map();
+      for (const item of cartItems) {
+        quantitiesByProduct.set(
+          item.product_id,
+          (quantitiesByProduct.get(item.product_id) || 0) + item.quantity,
+        );
+      }
+
+      const products = new Map();
+      for (const productId of [...quantitiesByProduct.keys()].sort((left, right) => left - right)) {
+        const product = await Product.findByPk(productId, {
+          include: [{ model: ProductOption, as: 'options' }],
+          transaction,
+          ...(transaction.LOCK?.UPDATE ? { lock: transaction.LOCK.UPDATE } : {}),
+        });
+        if (!product || !product.enabled) {
+          throw conflict('Um ou mais produtos do carrinho não estão mais disponíveis.');
+        }
+
+        const quantity = quantitiesByProduct.get(productId);
+        if (quantity > product.stock) {
+          throw conflict(`Estoque insuficiente para o produto ${product.name}.`);
+        }
+        products.set(productId, product);
+      }
+
+      const lines = cartItems.map((item) => {
+        const product = products.get(item.product_id);
+        return {
+          product,
+          quantity: item.quantity,
+          selectedOptions: validateSelectedOptions(item, product),
+          unitPriceCents: toCents(product.price_with_discount),
+        };
+      });
+      const totalCents = lines.reduce(
+        (total, line) => total + line.unitPriceCents * line.quantity,
+        0,
+      );
+      if (!Number.isSafeInteger(totalCents) || totalCents > 9999999999) {
+        throw badRequest('O total do pedido excede o valor máximo permitido.');
+      }
+
+      const createdOrder = await Order.create({
+        user_id: req.user.id,
+        status: 'pending',
+        fulfillment_status: 'unfulfilled',
+        idempotency_key: idempotencyKey || null,
+        expires_at: new Date(Date.now() + 30 * 60 * 1000),
+        total: fromCents(totalCents),
+        postal_code: address.postal_code,
+        street: address.street,
+        number: address.number,
+        complement: address.complement,
+        neighborhood: address.neighborhood,
+        city: address.city,
+        state: address.state,
+      }, { transaction });
+
+      await OrderItem.bulkCreate(lines.map((line) => ({
+        order_id: createdOrder.id,
+        product_id: line.product.id,
+        product_name: line.product.name,
+        quantity: line.quantity,
+        unit_price: fromCents(line.unitPriceCents),
+        selected_options: JSON.stringify(line.selectedOptions),
+      })), { transaction });
+
+      await recordOrderStatusChange({
+        order: createdOrder,
+        scope: 'fulfillment',
+        fromStatus: null,
+        toStatus: 'unfulfilled',
+        transaction,
+      });
+
+      for (const [productId, quantity] of quantitiesByProduct) {
+        await products.get(productId).decrement('stock', { by: quantity, transaction });
+      }
+
+      await CartItem.destroy({ where: { cart_id: cart.id }, transaction });
+
+      return Order.findByPk(createdOrder.id, {
+        include: orderIncludes(),
+        transaction,
+      });
     });
-    const totalCents = lines.reduce(
-      (total, line) => total + line.unitPriceCents * line.quantity,
-      0,
-    );
-    if (!Number.isSafeInteger(totalCents) || totalCents > 9999999999) {
-      throw badRequest('O total do pedido excede o valor máximo permitido.');
+  } catch (error) {
+    if (idempotencyKey && error.name === 'SequelizeUniqueConstraintError') {
+      const existing = await Order.findOne({
+        where: { user_id: req.user.id, idempotency_key: idempotencyKey },
+        include: orderIncludes(),
+      });
+      if (existing) {
+        return res.status(200).json(serializeOrder(existing));
+      }
     }
-
-    const createdOrder = await Order.create({
-      user_id: req.user.id,
-      status: 'pending',
-      expires_at: new Date(Date.now() + 30 * 60 * 1000),
-      total: fromCents(totalCents),
-      postal_code: address.postal_code,
-      street: address.street,
-      number: address.number,
-      complement: address.complement,
-      neighborhood: address.neighborhood,
-      city: address.city,
-      state: address.state,
-    }, { transaction });
-
-    await OrderItem.bulkCreate(lines.map((line) => ({
-      order_id: createdOrder.id,
-      product_id: line.product.id,
-      product_name: line.product.name,
-      quantity: line.quantity,
-      unit_price: fromCents(line.unitPriceCents),
-      selected_options: JSON.stringify(line.selectedOptions),
-    })), { transaction });
-
-    for (const [productId, quantity] of quantitiesByProduct) {
-      await products.get(productId).decrement('stock', { by: quantity, transaction });
-    }
-
-    await CartItem.destroy({ where: { cart_id: cart.id }, transaction });
-
-    return Order.findByPk(createdOrder.id, {
-      include: orderIncludes(),
-      transaction,
-    });
-  });
+    throw error;
+  }
 
   return res.status(201).json(serializeOrder(order));
 }
@@ -302,10 +361,19 @@ async function cancel(req, res) {
     }
 
     await releaseOrderStock(current.id, transaction);
+    const previousStatus = current.status;
     await current.update({
       status: 'cancelled',
       mercadopago_payment_status: 'cancelled',
     }, { transaction });
+    await recordOrderStatusChange({
+      order: current,
+      actorUserId: req.user.id,
+      scope: 'payment',
+      fromStatus: previousStatus,
+      toStatus: 'cancelled',
+      transaction,
+    });
     return current;
   });
 
@@ -380,11 +448,19 @@ async function webhook(req, res) {
       const approvedAfterExpiry = approvedAt && approvedAt > new Date(order.expires_at);
 
       if (order.status === 'pending' && !approvedAfterExpiry) {
+        const previousStatus = order.status;
         await order.update({
           status: 'paid',
           mercadopago_payment_id: paymentId,
           mercadopago_payment_status: 'approved',
         }, { transaction });
+        await recordOrderStatusChange({
+          order,
+          scope: 'payment',
+          fromStatus: previousStatus,
+          toStatus: 'paid',
+          transaction,
+        });
         return { refund: false };
       }
 
@@ -394,6 +470,13 @@ async function webhook(req, res) {
           status: 'cancelled',
           mercadopago_payment_status: 'refund_pending',
         }, { transaction });
+        await recordOrderStatusChange({
+          order,
+          scope: 'payment',
+          fromStatus: 'pending',
+          toStatus: 'cancelled',
+          transaction,
+        });
       } else if (order.status === 'paid' && order.mercadopago_payment_id === paymentId) {
         return { refund: false };
       } else if (order.status !== 'cancelled' && order.status !== 'paid') {

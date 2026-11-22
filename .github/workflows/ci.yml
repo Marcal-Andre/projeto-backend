@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  mysql-migrations:
+    name: MySQL migrations
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: store_test
+          MYSQL_USER: store_app
+          MYSQL_PASSWORD: ci-app-password
+          MYSQL_ROOT_PASSWORD: ci-root-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --password=ci-root-password --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply, rollback, and reapply all migrations
+        run: |
+          npm run db:migrate:status -- --env test
+          npm run db:migrate -- --env test
+          npx sequelize-cli db:migrate:undo:all --env test
+          npm run db:migrate -- --env test
+        env:
+          DB_NAME: store_test
+          DB_USER: store_app
+          DB_PASSWORD: ci-app-password
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+
+      - name: Start API and exercise read-only load against MySQL
+        run: |
+          set -euo pipefail
+          npm start > app.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:3000/health/ready; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:3000/health/ready
+          npm run test:load
+        env:
+          NODE_ENV: production
+          PORT: 3000
+          HOST: 127.0.0.1
+          APP_KEY: ci-only-signing-key-that-is-at-least-32-bytes
+          DB_NAME: store_test
+          DB_USER: store_app
+          DB_PASSWORD: ci-app-password
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          LOAD_TEST_URL: http://127.0.0.1:3000
+          LOAD_TEST_CONCURRENCY: 3
+          LOAD_TEST_DURATION_SECONDS: 5
+
+      - name: Verify database and media backup restoration
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y mysql-client
+          mkdir -p uploads
+          printf 'backup restore smoke test\n' > uploads/restore-smoke.txt
+          npm run db:backup
+          MYSQL_PWD=ci-root-password mysql --host=127.0.0.1 --user=root \
+            --execute="CREATE DATABASE store_restore"
+          backup_dir=$(find tmp/backups -mindepth 1 -maxdepth 1 -type d | head -n 1)
+          RESTORE_DB_NAME=store_restore npm run db:restore-check -- "$backup_dir"
+          mysql --host=127.0.0.1 --user=root --database=store_restore \
+            --batch --skip-column-names --execute="SHOW TABLES" | grep -q '^orders$'
+          restored_media=$(find . -maxdepth 2 -type f \
+            -path './uploads.restore-check-*/restore-smoke.txt' -print -quit)
+          test -n "$restored_media"
+        env:
+          NODE_ENV: test
+          DB_NAME: store_test
+          DB_USER: root
+          DB_PASSWORD: ci-root-password
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          MEDIA_DIR: uploads
+          BACKUP_DIR: tmp/backups
+          MYSQL_PWD: ci-root-password
+
+  test:
+    name: Tests and dependency audit
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - 20
+          - 22
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test -- --runInBand
+
+      - name: Audit dependencies
+        run: npm audit

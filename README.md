@@ -19,6 +19,8 @@ Para iniciar um MySQL 8.4 local isolado em Docker, execute `docker compose up -d
 
 `DB_NAME`, `DB_USER` e `APP_KEY` são obrigatórios. `DB_PASSWORD` é obrigatória fora do desenvolvimento local; em `NODE_ENV=development`, pode ser omitida somente quando `DB_HOST` aponta para `localhost`, `127.0.0.1` ou `::1`. Não use senha vazia em produção. Gere uma chave JWT com `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`. `ADMIN_EMAIL` e `ADMIN_PASSWORD` são opcionais, mas devem ser definidas juntas.
 
+Se a aplicação estiver atrás de um proxy reverso confiável, configure `TRUST_PROXY_HOPS` com o número exato de saltos de proxy (por exemplo, `1` para um proxy). O padrão `0` não confia em cabeçalhos encaminhados pelo cliente.
+
 Configure `CORS_ORIGINS` com as origens exatas do frontend, separadas por vírgula e sem caminhos. O exemplo libera `localhost:5173` e `127.0.0.1:5173` apenas para desenvolvimento; em produção, informe o domínio HTTPS do site. Origens não listadas não recebem permissão CORS.
 
 Com o MySQL em execução, crie o banco caso ainda não exista com `npx sequelize-cli db:create`, execute `npm run db:migrate:status`, depois `npm run db:migrate` e, por fim, `npm start`. A aplicação não cria nem altera tabelas automaticamente: o esquema só é aplicado pela migração. `npm run db:migrate:undo` desfaz a migração mais recente e remove as tabelas correspondentes; use com cautela.
@@ -37,7 +39,21 @@ Imagens são armazenadas no disco local em `MEDIA_DIR` e servidas por `/media`. 
 - `npm test -- --runInBand` executa testes unitários, de controladores e HTTP ponta a ponta usando SQLite em memória, sem conectar ao MySQL.
 - `npm run test:e2e` executa apenas os testes HTTP ponta a ponta.
 - `npm run test:concurrency` tenta manter 5.000 requisições HTTP simultâneas no endpoint `/health`. O teste segura as respostas por 15 segundos para criar requisições em voo; isso não mede a latência normal nem garante capacidade em produção.
-- Para validar capacidade real, execute um teste de carga no ambiente de implantação, incluindo banco de dados, rede e endpoints de negócio, e defina limites de latência e taxa de erro.
+- `npm run test:load` faz uma carga curta e somente leitura em `/health`, `/health/ready` e na busca pública de produtos. Por padrão usa `http://127.0.0.1:3000`, 5 conexões simultâneas e 10 segundos; configure `LOAD_TEST_URL`, `LOAD_TEST_CONCURRENCY` (máximo 20) e `LOAD_TEST_DURATION_SECONDS` (máximo 60). Hosts remotos exigem `LOAD_TEST_ALLOW_REMOTE=true`; rode-os apenas em ambiente autorizado e monitore banco, CPU, memória, latência e taxa de erro.
+- O CI executa as migrações em MySQL 8.4, desfaz todas e as reaplica, inicia a API ligada ao MySQL, executa uma carga curta somente leitura e testa backup/restauração do banco e da mídia em um destino vazio. Isso complementa os testes funcionais de aplicação em SQLite.
+- O CI também executa `npm audit` sem excluir dependências de desenvolvimento.
+
+## Backup e recuperação
+
+`npm run db:backup` usa `mysqldump` e o `MEDIA_DIR` configurado para gerar `backups/<data-UTC>/database.sql` e uma cópia da pasta de imagens. Requer o cliente `mysqldump` instalado e conexão configurada pelas variáveis de banco. Para restaurar, `db:restore-check` também requer o cliente `mysql`. Para manter banco e imagens consistentes, suspenda gravações durante o backup. Copie os backups para armazenamento externo, restrito e criptografado; um backup no mesmo disco do servidor não protege contra perda desse disco.
+
+Para ensaiar uma recuperação sem sobrescrever o banco ativo, crie previamente um banco MySQL vazio e diferente de `DB_NAME`, configure `RESTORE_DB_NAME` com esse nome e execute `npm run db:restore-check -- <pasta-do-backup>`. O comando recusa usar `DB_NAME` ou uma base que não esteja vazia e restaura as imagens em uma pasta `MEDIA_DIR.restore-check-*`; ele não altera a pasta ativa. Depois, verifique tabelas, registros e arquivos restaurados e remova manualmente a base/pasta de verificação quando não forem mais necessárias.
+
+Em hospedagem gerenciada, prefira os snapshots e testes de restauração do provedor para o banco; mantenha cópias de mídia no mesmo ciclo de backup e defina retenção e objetivo de recuperação (RPO/RTO) com o responsável pelo serviço.
+
+## Validação do Mercado Pago em sandbox
+
+Para validar a integração real, use somente um `MP_ACCESS_TOKEN` de teste (`TEST-...`), o segredo de webhook correspondente e uma URL HTTPS pública de túnel em `MP_PUBLIC_API_URL`. Não coloque credenciais no Git nem as envie em mensagens. Com as migrações aplicadas e a API acessível pelo túnel, crie um pedido e checkout, conclua o pagamento usando comprador/cartão de teste do Mercado Pago e confirme que o webhook atualizou o pedido e criou a notificação. Repita a notificação para conferir idempotência e teste o caminho de pagamento tardio com um pedido expirado/cancelado, verificando o estorno no painel sandbox. Nunca use cartão real ou token de produção nesse procedimento.
 
 O login real é `POST /v1/user/token`; os antigos endpoints de demonstração `/token` e `/validar-token` ficam desativados por padrão. O preço é armazenado como `DECIMAL(10,2)` em vez de ponto flutuante, para evitar erros de arredondamento monetário.
 
@@ -50,11 +66,17 @@ O login real é `POST /v1/user/token`; os antigos endpoints de demonstração `/
 - `GET /v1/user/:id` exige JWT e permite acesso ao titular da conta ou a um administrador.
 - A busca e a consulta pública de produtos retornam somente produtos habilitados.
 - `POST /v1/order` finaliza o carrinho com o endereço salvo, valida novamente disponibilidade/opções/estoque, registra os preços vigentes, reserva o estoque por 30 minutos e cria um pedido `pending` numa transação. `GET /v1/order` e `GET /v1/order/:id` mostram somente pedidos do usuário autenticado.
+- Envie um `Idempotency-Key` único por tentativa lógica em `POST /v1/order`; repetição da chave para o mesmo cliente retorna o pedido original em vez de criar outro. Sem o cabeçalho, o endpoint mantém o comportamento legado.
 - Para pagar, o cliente autenticado chama `POST /v1/order/:id/payment`; a resposta contém `checkout_url`, para redirecionar ao Checkout Pro. O pedido só muda para `paid` após confirmação assinada do webhook; URLs de retorno do navegador não confirmam pagamentos.
 - `POST /v1/order/:id/cancel` cancela um pedido pendente e libera o estoque. Pedidos pendentes expiram automaticamente após 30 minutos; uma aprovação recebida após cancelamento/expiração é estornada pelo backend.
+- Administradores consultam pedidos em `GET /v1/admin/orders` com paginação (`page`, `limit`) e filtros opcionais (`status`, `fulfillment_status`). `PATCH /v1/admin/orders/:id/fulfillment-status` avança pedidos pagos uma etapa por vez: `unfulfilled` → `processing` → `shipped` → `delivered`. A confirmação de pagamento não pode ser alterada por esse endpoint.
+- `GET /v1/notifications` lista as notificações do cliente autenticado, com paginação e contagem de não lidas. `PATCH /v1/notifications/:id/read` marca uma notificação própria como lida. Pagamento confirmado e atualizações de preparação/entrega são salvos no banco e podem ser consultados na API; não há envio de e-mail configurado.
+- `GET /v1/order/:id` inclui `fulfillment_status` e `fulfillment_history` para o acompanhamento do cliente. As mudanças são registradas com autor e horário.
+- Login, cadastro, criação de pedido e início de pagamento têm limites por IP: 10 logins por 15 minutos, 5 cadastros por hora e 10 criações/inícios de pagamento por 15 minutos. Em instalações com várias instâncias, use um armazenamento compartilhado de rate limit e configure corretamente o proxy confiável.
 - Configure `MP_ENVIRONMENT=sandbox`, `MP_ACCESS_TOKEN`, `MP_WEBHOOK_SECRET` e `MP_PUBLIC_API_URL` no `.env`. Use as credenciais de teste do Mercado Pago no desenvolvimento e credenciais de produção somente em implantação HTTPS. `MP_PUBLIC_API_URL` deve ser uma URL pública do backend (em desenvolvimento, use um túnel HTTPS) e o webhook deve estar configurado para eventos de pagamentos (`payment`). Nunca exponha essas credenciais no frontend.
 - As URLs de retorno do frontend ficam em `MP_SUCCESS_URL`, `MP_PENDING_URL` e `MP_FAILURE_URL`; os valores de exemplo apontam para `http://localhost:5173`.
-- Execute `npm run db:migrate` para criar também as tabelas de pedidos e itens.
+- Execute `npm run db:migrate` para criar as tabelas de pedidos, itens, histórico de etapas e notificações.
+- A configuração escolhida para este projeto é uma única instância: o rate limit usa memória local e as imagens ficam em `MEDIA_DIR`. Se a implantação mudar para várias instâncias, migre para armazenamento compartilhado de limite e imagens antes de escalar.
 
 ## Estrutura de diretório
 ```
@@ -68,6 +90,9 @@ project-root/
 │   ├── services/
 │   ├── app.js
 │   └── server.js
+├── scripts/
+│   ├── backup.js
+│   └── restore-check.js
 ├── tests/
 ├── .env
 ├── .gitignore

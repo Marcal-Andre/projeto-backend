@@ -16,6 +16,8 @@ const {
   sequelize,
   Order,
   OrderItem,
+  OrderStatusHistory,
+  Notification,
   User,
 } = require('../src/models');
 
@@ -143,6 +145,14 @@ describe('pagamento e notificações de pedidos', () => {
       mercadopago_payment_id: 'payment-1',
       mercadopago_payment_status: 'approved',
     });
+
+    await orderController.webhook(webhookRequest('payment-1'), response());
+    await expect(OrderStatusHistory.count({
+      where: { order_id: order.id, scope: 'payment', to_status: 'paid' },
+    })).resolves.toBe(1);
+    await expect(Notification.count({
+      where: { order_id: order.id, type: 'payment.paid' },
+    })).resolves.toBe(1);
   });
 
   it('does not trust an approved payment for a different order amount', async () => {

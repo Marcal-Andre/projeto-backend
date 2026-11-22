@@ -10,11 +10,21 @@ const productRoutes = require('./routes/productRoutes');
 const cartRoutes = require('./routes/cartRoutes');
 const orderRoutes = require('./routes/orderRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
+const adminOrderRoutes = require('./routes/adminOrderRoutes');
+const notificationRoutes = require('./routes/notificationRoutes');
 const sequelize = require('./config/database');
 
 const app = express();
+const trustProxyHops = process.env.TRUST_PROXY_HOPS === undefined
+  ? 0
+  : Number(process.env.TRUST_PROXY_HOPS);
+
+if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0 || trustProxyHops > 10) {
+  throw new Error('TRUST_PROXY_HOPS deve ser um inteiro entre 0 e 10.');
+}
 
 app.disable('x-powered-by');
+app.set('trust proxy', trustProxyHops);
 app.use(cors);
 app.use(express.json({ limit: '12mb' }));
 app.use('/media', express.static(MEDIA_ROOT, {
@@ -49,6 +59,8 @@ app.use('/v1/product', productRoutes);
 app.use('/v1/cart', cartRoutes);
 app.use('/v1/order', orderRoutes);
 app.use('/v1/payments', paymentRoutes);
+app.use('/v1/admin/orders', adminOrderRoutes);
+app.use('/v1/notifications', notificationRoutes);
 
 if (
   process.env.ENABLE_DEMO_TOKEN_ENDPOINTS === 'true' &&

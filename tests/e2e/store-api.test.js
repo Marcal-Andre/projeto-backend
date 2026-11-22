@@ -31,8 +31,8 @@ describe('API da loja ponta a ponta', () => {
   let imageUrl;
   let optionId;
 
-  async function request(url, { method = 'GET', body, token } = {}) {
-    const headers = {};
+  async function request(url, { method = 'GET', body, token, headers: extraHeaders = {} } = {}) {
+    const headers = { ...extraHeaders };
     if (body !== undefined) {
       headers['Content-Type'] = 'application/json';
     }
@@ -107,6 +107,11 @@ describe('API da loja ponta a ponta', () => {
     expect(await User.unscoped().findByPk(registration.body.id)).toMatchObject({
       role: 'customer',
     });
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      expect((await request('/v1/user', { method: 'POST', body: {} })).status).toBe(400);
+    }
+    expect((await request('/v1/user', { method: 'POST', body: {} })).status).toBe(429);
 
     customer = registration.body;
     const login = await request('/v1/user/token', {
@@ -379,6 +384,7 @@ describe('API da loja ponta a ponta', () => {
     const checkout = await request('/v1/order', {
       method: 'POST',
       token: customerToken,
+      headers: { 'Idempotency-Key': 'checkout-request-1' },
     });
     expect(checkout.status).toBe(201);
     expect(checkout.body).toMatchObject({
@@ -394,6 +400,13 @@ describe('API da loja ponta a ponta', () => {
       }],
     });
     const orderId = checkout.body.id;
+    const repeatedCheckout = await request('/v1/order', {
+      method: 'POST',
+      token: customerToken,
+      headers: { 'Idempotency-Key': 'checkout-request-1' },
+    });
+    expect(repeatedCheckout.status).toBe(200);
+    expect(repeatedCheckout.body.id).toBe(orderId);
     expect((await request('/v1/cart', { token: customerToken })).body.items).toEqual([]);
     expect((await request(`/v1/order/${orderId}/payment`, { method: 'POST' })).status).toBe(401);
     expect((await request(`/v1/order/${orderId}`, { token: adminToken })).status).toBe(404);
@@ -401,6 +414,94 @@ describe('API da loja ponta a ponta', () => {
     expect(orderHistory.body).toMatchObject({ total: 1, data: [{ id: orderId, status: 'pending' }] });
     expect((await request(`/v1/order/${orderId}`, { token: customerToken })).body.id).toBe(orderId);
     expect((await request('/v1/order', { token: customerToken, method: 'POST' })).status).toBe(400);
+    expect((await request('/v1/admin/orders')).status).toBe(401);
+    expect((await request('/v1/admin/orders', { token: customerToken })).status).toBe(403);
+
+    await Order.update({ status: 'paid' }, { where: { id: orderId } });
+    const adminOrders = await request(
+      '/v1/admin/orders?status=paid&fulfillment_status=unfulfilled&limit=1',
+      { token: adminToken },
+    );
+    expect(adminOrders.status).toBe(200);
+    expect(adminOrders.body).toMatchObject({
+      total: 1,
+      data: [{
+        id: orderId,
+        customer: { id: customer.id, email: customer.email },
+        fulfillment_status: 'unfulfilled',
+        delivery_address: { city: 'Campinas', state: 'SP' },
+      }],
+    });
+
+    const skippedStage = await request(`/v1/admin/orders/${orderId}/fulfillment-status`, {
+      method: 'PATCH',
+      token: adminToken,
+      body: { fulfillment_status: 'shipped' },
+    });
+    expect(skippedStage.status).toBe(409);
+
+    expect((await request(`/v1/admin/orders/${orderId}/fulfillment-status`, {
+      method: 'PATCH',
+      token: customerToken,
+      body: { fulfillment_status: 'processing' },
+    })).status).toBe(403);
+    expect((await request(`/v1/admin/orders/${orderId}/fulfillment-status`, {
+      method: 'PATCH',
+      token: adminToken,
+      body: { status: 'paid' },
+    })).status).toBe(400);
+
+    const processing = await request(`/v1/admin/orders/${orderId}/fulfillment-status`, {
+      method: 'PATCH',
+      token: adminToken,
+      body: { fulfillment_status: 'processing' },
+    });
+    expect(processing.status).toBe(200);
+    expect(processing.body.fulfillment_status).toBe('processing');
+    const adminHistory = await request(
+      `/v1/admin/orders?status=paid&fulfillment_status=processing`,
+      { token: adminToken },
+    );
+    expect(adminHistory.body.data[0].fulfillment_history).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: 'processing',
+        actor_user_id: expect.any(Number),
+      }),
+    ]));
+
+    const customerOrder = await request(`/v1/order/${orderId}`, { token: customerToken });
+    expect(customerOrder.body.fulfillment_history.map((entry) => entry.status)).toEqual([
+      'unfulfilled',
+      'processing',
+    ]);
+
+    const notifications = await request('/v1/notifications?limit=1', { token: customerToken });
+    expect(notifications.body).toMatchObject({
+      total: 1,
+      unread: 1,
+      data: [{ order_id: orderId, type: 'fulfillment.processing' }],
+    });
+    expect((await request('/v1/notifications', { token: adminToken })).body.total).toBe(0);
+    expect((await request(`/v1/notifications/${notifications.body.data[0].id}/read`, {
+      method: 'PATCH',
+      token: adminToken,
+    })).status).toBe(404);
+    const markedRead = await request(`/v1/notifications/${notifications.body.data[0].id}/read`, {
+      method: 'PATCH',
+      token: customerToken,
+    });
+    expect(markedRead.status).toBe(200);
+    expect((await request('/v1/notifications', { token: customerToken })).body.unread).toBe(0);
+
+    for (const fulfillmentStatus of ['shipped', 'delivered']) {
+      const update = await request(`/v1/admin/orders/${orderId}/fulfillment-status`, {
+        method: 'PATCH',
+        token: adminToken,
+        body: { fulfillment_status: fulfillmentStatus },
+      });
+      expect(update.status).toBe(200);
+      expect(update.body.fulfillment_status).toBe(fulfillmentStatus);
+    }
 
     await request('/v1/cart/items', {
       method: 'POST',
